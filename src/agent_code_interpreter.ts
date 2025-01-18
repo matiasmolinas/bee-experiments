@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
 import { UnconstrainedMemory } from "bee-agent-framework/memory/unconstrainedMemory";
 import { LocalPythonStorage } from "bee-agent-framework/tools/python/storage";
 import { CustomTool } from "bee-agent-framework/tools/custom";
-import { getChatLLM } from "./helpers/llm.js";
 import { getPrompt } from "./helpers/prompt.js";
+
+import { GroqChatLLM } from "bee-agent-framework/adapters/groq/chat";
 
 const codeInterpreterUrl = process.env.CODE_INTERPRETER_URL;
 if (!codeInterpreterUrl) {
@@ -19,7 +20,7 @@ if (!codeInterpreterUrl) {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const agent = new BeeAgent({
-  llm: getChatLLM(),
+  llm: new GroqChatLLM(),
   memory: new UnconstrainedMemory(),
   tools: [
     new PythonTool({
