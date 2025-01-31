@@ -19,6 +19,7 @@ import { LocalPythonStorage } from "bee-agent-framework/tools/python/storage";
 import { PythonTool } from "bee-agent-framework/tools/python/python";
 import { AnyTool } from "bee-agent-framework/tools/base";
 import { GroqChatLLM } from "bee-agent-framework/adapters/groq/chat";
+import { OpenAIChatLLM } from "bee-agent-framework/adapters/openai/chat";
 import { PromptTemplate } from "bee-agent-framework/template";
 import { z } from "zod";
 
@@ -87,7 +88,9 @@ const combinedSystemPrompt = new PromptTemplate({
 
 // 6) Construct the BeeAgent
 const agent = new BeeAgent({
+  //llm: new GroqChatLLM({"modelId":"llama-3.1-8b-instant"}),
   llm: new GroqChatLLM(),
+  //llm: new OpenAIChatLLM(),
   memory: new UnconstrainedMemory(),
   tools,
   meta: {
@@ -130,7 +133,8 @@ async function runAgentWithPrompt(promptText: string) {
 }
 
 // 7) Demo usage with two sample queries
-await runAgentWithPrompt("Generate a random riddle.");
+//await runAgentWithPrompt("Generate a random riddle.");
+//await runAgentWithPrompt("Generate a random riddlewith local code only.");
 await runAgentWithPrompt(
   "Fetch a random riddle from 'https://riddles-api.vercel.app/random' endpoint.",
 );
