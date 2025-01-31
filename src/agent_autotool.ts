@@ -1,9 +1,11 @@
 /**
  * agent_autotool.ts
  *
- * This agent can create new tools on the fly to satisfy user requests.
- * We include two prompts so you can see how it might build or reuse custom tools
- * for different random riddle tasks.
+ * A Bee agent that can:
+ *  - Use a Python code interpreter
+ *  - Generate new custom tools (CreateCustomTool)
+ *  - If developer mode=ON, rely on HumanTool for snippet refinements & final approval
+ *  - Save the final snippet in library.json
  */
 
 import "dotenv/config.js";
@@ -17,11 +19,17 @@ import { LocalPythonStorage } from "bee-agent-framework/tools/python/storage";
 import { PythonTool } from "bee-agent-framework/tools/python/python";
 import { AnyTool } from "bee-agent-framework/tools/base";
 import { GroqChatLLM } from "bee-agent-framework/adapters/groq/chat";
+import { OpenAIChatLLM } from "bee-agent-framework/adapters/openai/chat";
+import { PromptTemplate } from "bee-agent-framework/template";
+import { z } from "zod";
 
-// The tool that can create new custom tools on the fly
 import { CreateCustomTool } from "./createCustomTool.js";
+import { HumanTool } from "./humanTool.js";
+import { FIRMWARE_SYSTEM_PROMPT } from "./firmwarePrompt.js";
+import { getPrompt } from "./helpers/prompt.js";
+import { createConsoleReader } from "./helpers/io.js";
 
-// Import your custom prompt templates
+// Just an example set of Bee prompts, or you can define your own
 import {
   MySystemPrompt,
   MyAssistantPrompt,
@@ -31,22 +39,14 @@ import {
   MySchemaErrorPrompt,
 } from "./prompts.js";
 
-// If you still have a helper function for user prompts:
-import { getPrompt } from "./helpers/prompt.js";
-
-/**
- * Validate environment
- */
 const codeInterpreterUrl = process.env.CODE_INTERPRETER_URL;
 if (!codeInterpreterUrl) {
-  throw new Error(`The 'CODE_INTERPRETER_URL' environment variable was not set! Terminating.`);
+  throw new Error(`The 'CODE_INTERPRETER_URL' environment variable is required!`);
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/**
- * 1) Instantiate the base Python tool
- */
+// 1) We have a PythonTool
 const pythonTool = new PythonTool({
   codeInterpreter: { url: codeInterpreterUrl },
   storage: new LocalPythonStorage({
@@ -55,30 +55,51 @@ const pythonTool = new PythonTool({
   }),
 });
 
-/**
- * 2) Create an array of tools (no pre-built custom tools this time)
- */
+// 2) Create an array of base tools
 const tools: AnyTool[] = [pythonTool];
 
-/**
- * 3) Instantiate the createCustomTool and push it into 'tools'
- */
+// 3) Create a "HumanTool" for dev-mode scenario
+const reader = createConsoleReader();
+const humanTool = new HumanTool({ reader });
+tools.push(humanTool);
+
+// 4) Create the "CreateCustomTool" that can produce new custom tools
 const createCustomTool = new CreateCustomTool({ url: codeInterpreterUrl }, tools);
 tools.push(createCustomTool);
 
-/**
- * 4) Construct the BeeAgent
- */
+// 5) Merge the firmware with your system prompt
+const combinedSystemPrompt = new PromptTemplate({
+  schema: z.object({
+    instructions: z.string().default("You are a helpful assistant."),
+    tools: z.array(
+      z
+        .object({
+          name: z.string().min(1),
+          description: z.string().min(1),
+          schema: z.string().min(1),
+        })
+        .passthrough(),
+    ),
+    createdAt: z.string().datetime().nullish(),
+  }),
+  // Get the template string from the original prompt's configuration
+  template: `${FIRMWARE_SYSTEM_PROMPT}\n${(MySystemPrompt as any).config.template}`,
+});
+
+// 6) Construct the BeeAgent
 const agent = new BeeAgent({
+  //llm: new GroqChatLLM({"modelId":"llama-3.1-8b-instant"}),
   llm: new GroqChatLLM(),
+  //llm: new OpenAIChatLLM(),
   memory: new UnconstrainedMemory(),
   tools,
   meta: {
     name: "Bee Auto-Tooling Agent",
-    description: "Agent that can create custom tools on the fly if needed.",
+    description:
+      "Agent that can create custom tools on the fly and request human snippet approvals.",
   },
   templates: {
-    system: MySystemPrompt,
+    system: combinedSystemPrompt,
     assistant: MyAssistantPrompt,
     user: MyUserPrompt,
     toolError: MyToolErrorPrompt,
@@ -93,51 +114,30 @@ const agent = new BeeAgent({
 });
 
 /**
- * 5) Demonstrate how the agent handles two different prompts.
- *    - The first prompt is the same "Generate a random riddle."
- *      from your original code_interpreter example.
- *    - The second prompt references the Vercel random riddle API,
- *      encouraging the agent to create a custom tool that calls it
- *      (similar to your original snippet).
+ * Simple function to run a prompt through the agent
  */
 async function runAgentWithPrompt(promptText: string) {
   console.info(`\nUser 👤 : ${promptText}`);
-
   try {
     const prompt = getPrompt(promptText);
-    const response = await agent
-      .run(
-        { prompt },
-        {
-          execution: {
-            maxIterations: 8,
-            maxRetriesPerStep: 3,
-            totalMaxRetries: 10,
-          },
-        },
-      )
-      .observe((emitter) => {
-        // Optionally log intermediate steps from the agent
-        emitter.on("update", (data) => {
-          console.info(`Agent 🤖 (${data.update.key}) : ${data.update.value}`);
-        });
+    const response = await agent.run({ prompt }).observe((emitter) => {
+      emitter.on("update", (data) => {
+        console.info(`Agent 🤖 (${data.update.key}): ${data.update.value}`);
       });
+    });
 
-    // Print final agent response
     console.info(`Agent 🤖 Final Answer: ${response.result.text}`);
   } catch (error) {
     console.error(FrameworkError.ensure(error).dump());
   }
 }
 
-//
-// 6) Execute with two different prompts
-//
-
-// 6a) First prompt: the same original request
-await runAgentWithPrompt("Generate a random riddle.");
-
-// 6b) Second prompt: more explicit reference to the vercel riddle API
+// 7) Demo usage with two sample queries
+//await runAgentWithPrompt("Generate a random riddle.");
+//await runAgentWithPrompt("Generate a random riddlewith local code only.");
 await runAgentWithPrompt(
-  "Fetch a random riddle from the 'https://riddles-api.vercel.app/random' endpoint.",
+  "Fetch a random riddle from 'https://riddles-api.vercel.app/random' endpoint.",
 );
+
+// End
+process.exit(0);

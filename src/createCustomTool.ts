@@ -1,4 +1,3 @@
-// createCustomTool.ts
 import { z } from "zod";
 import {
   Tool,
@@ -12,83 +11,115 @@ import { CustomTool } from "bee-agent-framework/tools/custom";
 import { FrameworkError } from "bee-agent-framework/errors";
 import { Emitter } from "bee-agent-framework/emitter/emitter";
 
-/**
- * A tool that the agent can call to create another CustomTool on the fly.
- */
-export class CreateCustomTool extends Tool<StringToolOutput> {
-  // Provide a name and description for your new tool
-  name = "create_custom_tool";
-  description =
-    "Creates a brand new CustomTool on-the-fly by providing name, description, sourceCode, and optional inputSchema. Returns JSON with the new tool's name.";
+import { checkFirmwarePolicy, createToolRecord, saveToolRecord } from "./firmwareAndLibrary.js";
 
-  /**
-   * The emitter property is required by the Tool base class.
-   * We assign a new child emitter from the root.
-   */
+const DEV_MODE = process.env.DEVELOPER_MODE === "true";
+const TOOL_VERSION = "2.1.0";
+
+export class CreateCustomTool extends Tool<StringToolOutput> {
+  name = "create_custom_tool";
+  description = `
+    Generates a brand-new CustomTool from the provided Python snippet.
+    If dev mode=true, you must show the snippet to the user using "HumanTool"
+    for possible refinements or final approval (YES/NO).
+    Tool Version: ${TOOL_VERSION}
+  `;
+
+  private weakToolsRef: WeakRef<AnyTool[]>;
+
   public readonly emitter: ToolEmitter<ToolInput<this>, StringToolOutput> = Emitter.root.child({
     namespace: ["tool", "createCustomTool"],
     creator: this,
   });
 
-  /**
-   * Keep a reference to the array of tools, so we can .push() the newly created tool.
-   * Use the type AnyTool[] to avoid mismatched generics.
-   */
   constructor(
     private codeInterpreter: CodeInterpreterOptions,
-    private toolsRef: AnyTool[],
+    toolsRef: AnyTool[],
   ) {
     super({});
+    this.weakToolsRef = new WeakRef(toolsRef);
+    console.log(`CreateCustomTool initialized - Version ${TOOL_VERSION} - Dev Mode: ${DEV_MODE}`);
   }
 
-  /**
-   * The agent must pass JSON arguments that match this schema:
-   * {
-   *   name: string,
-   *   description: string,
-   *   sourceCode: string,
-   *   inputSchema?: any
-   * }
-   */
   inputSchema() {
     return z.object({
       name: z.string().min(1),
       description: z.string().min(1),
       sourceCode: z.string().min(1),
       inputSchema: z.any().optional(),
+      approved: z.boolean().optional(), // New field to track approval
     });
   }
 
-  /**
-   * The core execution method that the agent will call.
-   * We parse the input, generate a new CustomTool, push it into the tool array, and return the new tool name.
-   */
+  createSnapshot() {
+    const base = super.createSnapshot();
+    return {
+      ...base,
+      version: TOOL_VERSION,
+      toolsRef: "[WeakRef]",
+    };
+  }
+
   protected async _run(input: ToolInput<this>): Promise<StringToolOutput> {
     try {
-      // Dynamically create the new tool
+      const tools = this.weakToolsRef.deref();
+      if (!tools) {
+        throw new FrameworkError("Tools reference has been garbage collected");
+      }
+
+      console.log(`CreateCustomTool ${TOOL_VERSION} - Processing tool: ${input.name}`);
+
+      // 1) Firmware checks
+      const { approved, errors } = checkFirmwarePolicy(input.sourceCode);
+      if (!approved) {
+        console.log(`CreateCustomTool ${TOOL_VERSION} - Firmware rejected snippet`);
+        return new StringToolOutput(`Snippet REJECTED by firmware: ${errors.join("; ")}`);
+      }
+
+      // 2) Dev mode handling
+      if (DEV_MODE && !input.approved) {
+        console.log(`CreateCustomTool ${TOOL_VERSION} - Requesting user approval`);
+        return new StringToolOutput(
+          JSON.stringify({
+            message: `Dev mode active. Use 'HumanTool' with scenario='refinement' or 'approval' 
+                    to let user see snippet, refine it, and eventually type YES. 
+                    Then call 'create_custom_tool' again with the final snippet if user modifies it,
+                    or proceed if user typed "YES".`,
+            snippet: input.sourceCode,
+          }),
+        );
+      }
+
+      // 3) Create and save tool
+      console.log(`CreateCustomTool ${TOOL_VERSION} - Creating new tool`);
       const newTool = await CustomTool.fromSourceCode(this.codeInterpreter, input.sourceCode);
-
-      // Override the auto-detected name and description if provided by the agent
-      if (input.name) {newTool.name = input.name;}
-      if (input.description) {newTool.description = input.description;}
-
-      // If the user provided an explicit input schema, override it
+      newTool.name = input.name;
+      newTool.description = input.description;
       if (input.inputSchema) {
         (newTool as any).options.inputSchema = input.inputSchema;
       }
 
-      // Register the new tool in the agent's tool list
-      this.toolsRef.push(newTool as AnyTool);
+      tools.push(newTool as AnyTool);
 
-      // Return JSON with the new tool's name
-      const outputJSON = {
-        tool_name: newTool.name,
-        message: `A new tool named '${newTool.name}' has been created and added to the toolset.`,
-      };
+      // Save to library
+      console.log(`CreateCustomTool ${TOOL_VERSION} - Saving tool to library`);
+      const rec = createToolRecord(input.name, input.description, input.sourceCode);
+      saveToolRecord(rec);
 
-      return new StringToolOutput(JSON.stringify(outputJSON));
-    } catch (e: any) {
-      throw new FrameworkError(`Failed to create new custom tool: ${e.message}`, [e]);
+      console.log(`CreateCustomTool ${TOOL_VERSION} - Successfully created and saved tool: ${input.name}`);
+
+      return new StringToolOutput(
+        JSON.stringify({
+          tool_name: newTool.name,
+          version: TOOL_VERSION,
+          message: `Tool '${newTool.name}' created and saved to library. ${
+            DEV_MODE ? "User approved." : "Dev mode=OFF."
+          }`,
+        }),
+      );
+    } catch (err: any) {
+      console.error(`CreateCustomTool ${TOOL_VERSION} - Error:`, err.message);
+      throw new FrameworkError(`Failed to create new custom tool: ${err.message}`, [err]);
     }
   }
 }
